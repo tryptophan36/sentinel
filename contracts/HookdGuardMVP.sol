@@ -1,0 +1,500 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import {BaseHook} from "v4-periphery/BaseHook.sol";
+import {Hooks} from "v4-core/libraries/Hooks.sol";
+import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+import {PoolKey} from "v4-core/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
+import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
+import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/types/BeforeSwapDelta.sol";
+
+/// @title HookdGuardMVP
+/// @notice Protects LPs from MEV through velocity limits and progressive fees
+contract HookdGuardMVP is BaseHook {
+    using PoolIdLibrary for PoolKey;
+
+    // ============================================
+    // STATE VARIABLES
+    // ============================================
+    
+    /// @notice Pool velocity and volume tracking
+    struct PoolState {
+        uint128 recentVolume;        // Volume in last 10 blocks
+        uint128 baselineVolume;      // 24hr moving average
+        uint64 lastUpdateBlock;      // Last state update
+        uint160 lastPrice;           // Last sqrt price
+    }
+    
+    /// @notice Per-address swap history for progressive fees
+    struct SwapHistory {
+        uint16 swapsInWindow;        // Swaps in last 50 blocks
+        uint128 volumeInWindow;      // Volume in last 50 blocks
+        uint64 lastSwapBlock;        // Last swap block number
+    }
+    
+    /// @notice Challenge submitted by keepers
+    struct Challenge {
+        address suspectedAttacker;   // Address under investigation
+        address challenger;          // Keeper who submitted
+        bytes32 evidenceHash;        // IPFS hash of evidence
+        uint64 submitBlock;          // When submitted
+        uint16 votesFor;             // Votes approving
+        uint16 votesAgainst;         // Votes rejecting
+        bool executed;               // Whether penalty applied
+        uint128 challengerStake;     // Stake put up by challenger
+    }
+    
+    /// @notice Keeper registration
+    struct Keeper {
+        uint128 stake;               // ETH staked
+        uint64 reputationScore;      // 0-10000 scale
+        bool isActive;               // Currently active
+    }
+    
+    /// @notice Pool-specific configuration
+    struct PoolConfig {
+        uint16 velocityMultiplier;   // Max velocity (e.g., 300 = 3x)
+        uint16 blockWindow;          // Blocks to track (e.g., 10)
+        uint16 surgeFeeMultiplier;   // Fee increase rate (e.g., 500 = 5x)
+        bool protectionEnabled;      // Master switch
+    }
+    
+    // State mappings
+    mapping(PoolId => PoolState) public poolStates;
+    mapping(PoolId => PoolConfig) public poolConfigs;
+    mapping(address => mapping(PoolId => SwapHistory)) public swapHistories;
+    mapping(address => Keeper) public keepers;
+    mapping(PoolId => Challenge[]) public challenges;
+    mapping(PoolId => mapping(address => uint64)) public addressPenalties; // Penalty until block
+    
+    address[] public activeKeepers;
+    
+    // Constants
+    uint256 public constant MIN_KEEPER_STAKE = 0.1 ether;
+    uint256 public constant CHALLENGE_DURATION = 5; // blocks
+    uint256 public constant PENALTY_DURATION = 100; // blocks
+    uint256 public constant PENALTY_FEE_BPS = 5000; // 50% extra fee
+    
+    // ============================================
+    // EVENTS
+    // ============================================
+    
+    event KeeperRegistered(address indexed keeper, uint128 stake);
+    event ChallengeSubmitted(
+        PoolId indexed poolId,
+        uint256 challengeId,
+        address indexed attacker,
+        address indexed challenger
+    );
+    event ChallengeVoted(
+        PoolId indexed poolId,
+        uint256 challengeId,
+        address indexed voter,
+        bool support
+    );
+    event ChallengeExecuted(
+        PoolId indexed poolId,
+        uint256 challengeId,
+        bool approved
+    );
+    event ProtectionTriggered(
+        PoolId indexed poolId,
+        address indexed swapper,
+        uint24 fee,
+        string reason
+    );
+    
+    // ============================================
+    // CONSTRUCTOR
+    // ============================================
+    
+    constructor(IPoolManager _poolManager) BaseHook(_poolManager) {}
+    
+    // ============================================
+    // HOOK PERMISSIONS
+    // ============================================
+    
+    function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
+        return Hooks.Permissions({
+            beforeInitialize: false,
+            afterInitialize: true,
+            beforeAddLiquidity: false,
+            afterAddLiquidity: false,
+            beforeRemoveLiquidity: false,
+            afterRemoveLiquidity: false,
+            beforeSwap: true,
+            afterSwap: true,
+            beforeDonate: false,
+            afterDonate: false,
+            beforeSwapReturnDelta: false,
+            afterSwapReturnDelta: false,
+            afterAddLiquidityReturnDelta: false,
+            afterRemoveLiquidityReturnDelta: false
+        });
+    }
+    
+    // ============================================
+    // HOOK IMPLEMENTATIONS
+    // ============================================
+    
+    /// @notice Initialize pool configuration
+    function afterInitialize(
+        address,
+        PoolKey calldata key,
+        uint160 sqrtPriceX96,
+        int24,
+        bytes calldata
+    ) external override onlyPoolManager returns (bytes4) {
+        PoolId poolId = key.toId();
+        
+        // Set default configuration
+        poolConfigs[poolId] = PoolConfig({
+            velocityMultiplier: 300,      // 3x baseline
+            blockWindow: 10,              // 10 blocks
+            surgeFeeMultiplier: 500,      // 5x surge
+            protectionEnabled: true
+        });
+        
+        // Initialize state
+        poolStates[poolId] = PoolState({
+            recentVolume: 0,
+            baselineVolume: 1 ether,      // Default 1 ETH baseline
+            lastUpdateBlock: uint64(block.number),
+            lastPrice: sqrtPriceX96
+        });
+        
+        return BaseHook.afterInitialize.selector;
+    }
+    
+    /// @notice Main protection logic before swap
+    function beforeSwap(
+        address sender,
+        PoolKey calldata key,
+        IPoolManager.SwapParams calldata params,
+        bytes calldata
+    ) external override onlyPoolManager returns (bytes4, BeforeSwapDelta, uint24) {
+        PoolId poolId = key.toId();
+        PoolConfig memory config = poolConfigs[poolId];
+        
+        // Skip if protection disabled
+        if (!config.protectionEnabled) {
+            return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+        }
+        
+        // Calculate swap amount (absolute value)
+        uint128 swapAmount = uint128(
+            params.amountSpecified > 0 
+                ? uint256(params.amountSpecified)
+                : uint256(-params.amountSpecified)
+        );
+        
+        // Layer 1: Velocity Protection
+        uint24 velocityFee = _checkVelocity(poolId, swapAmount, config);
+        
+        // Layer 2: Progressive Fees
+        uint24 progressiveFee = _checkProgressive(poolId, sender, swapAmount);
+        
+        // Layer 3: Challenge Penalty
+        uint24 penaltyFee = _checkPenalty(poolId, sender);
+        
+        // Combine fees (take maximum to avoid stacking)
+        uint24 totalFee = _maxFee(velocityFee, progressiveFee, penaltyFee);
+        
+        // Emit if protection triggered
+        if (totalFee > 0) {
+            emit ProtectionTriggered(poolId, sender, totalFee, "MEV_PROTECTION");
+        }
+        
+        return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, totalFee);
+    }
+    
+    /// @notice Update state after swap
+    function afterSwap(
+        address sender,
+        PoolKey calldata key,
+        IPoolManager.SwapParams calldata params,
+        BalanceDelta,
+        bytes calldata
+    ) external override onlyPoolManager returns (bytes4, int128) {
+        PoolId poolId = key.toId();
+        
+        uint128 swapAmount = uint128(
+            params.amountSpecified > 0 
+                ? uint256(params.amountSpecified)
+                : uint256(-params.amountSpecified)
+        );
+        
+        // Update pool state
+        _updatePoolState(poolId, swapAmount);
+        
+        // Update swap history
+        _updateSwapHistory(poolId, sender, swapAmount);
+        
+        return (BaseHook.afterSwap.selector, 0);
+    }
+    
+    // ============================================
+    // PROTECTION LAYER FUNCTIONS
+    // ============================================
+    
+    /// @notice Layer 1: Check velocity and apply surge pricing
+    function _checkVelocity(
+        PoolId poolId,
+        uint128 swapAmount,
+        PoolConfig memory config
+    ) internal view returns (uint24) {
+        PoolState memory state = poolStates[poolId];
+        
+        // Reset if window expired
+        uint128 currentVolume = state.recentVolume;
+        if (block.number > state.lastUpdateBlock + config.blockWindow) {
+            currentVolume = 0;
+        }
+        
+        uint128 newVolume = currentVolume + swapAmount;
+        uint128 maxAllowed = state.baselineVolume * config.velocityMultiplier / 100;
+        
+        // If under threshold, no surge fee
+        if (newVolume <= maxAllowed) {
+            return 0;
+        }
+        
+        // Calculate surge fee
+        uint256 excessRatio = (newVolume - maxAllowed) * 10000 / maxAllowed;
+        uint24 surgeFee = uint24((3000 * config.surgeFeeMultiplier * excessRatio) / 10000);
+        
+        // Cap at 10%
+        return surgeFee > 100000 ? 100000 : surgeFee;
+    }
+    
+    /// @notice Layer 2: Progressive fees based on frequency
+    function _checkProgressive(
+        PoolId poolId,
+        address sender,
+        uint128 swapAmount
+    ) internal view returns (uint24) {
+        SwapHistory memory history = swapHistories[sender][poolId];
+        
+        // Reset if window expired
+        uint16 swapCount = history.swapsInWindow;
+        if (block.number > history.lastSwapBlock + 50) {
+            swapCount = 0;
+        }
+        
+        // Calculate progressive multiplier
+        // Each swap adds 20% to fee
+        uint24 multiplier = uint24(100 + (swapCount * 20));
+        uint24 baseFee = 3000; // 0.3%
+        uint24 adjustedFee = baseFee * multiplier / 100;
+        
+        return adjustedFee > baseFee ? adjustedFee - baseFee : 0;
+    }
+    
+    /// @notice Layer 3: Penalty for challenged addresses
+    function _checkPenalty(
+        PoolId poolId,
+        address sender
+    ) internal view returns (uint24) {
+        uint64 penaltyUntil = addressPenalties[poolId][sender];
+        
+        if (block.number < penaltyUntil) {
+            return uint24(PENALTY_FEE_BPS * 10); // 50% = 5000 bps
+        }
+        
+        return 0;
+    }
+    
+    /// @notice Return maximum fee
+    function _maxFee(uint24 a, uint24 b, uint24 c) internal pure returns (uint24) {
+        uint24 max = a > b ? a : b;
+        return max > c ? max : c;
+    }
+    
+    // ============================================
+    // STATE UPDATE FUNCTIONS
+    // ============================================
+    
+    /// @notice Update pool velocity state
+    function _updatePoolState(PoolId poolId, uint128 swapAmount) internal {
+        PoolState storage state = poolStates[poolId];
+        PoolConfig memory config = poolConfigs[poolId];
+        
+        // Reset if window expired
+        if (block.number > state.lastUpdateBlock + config.blockWindow) {
+            state.recentVolume = swapAmount;
+        } else {
+            state.recentVolume += swapAmount;
+        }
+        
+        state.lastUpdateBlock = uint64(block.number);
+        
+        // Update baseline (simple moving average)
+        // In production, would use proper TWAP
+        state.baselineVolume = (state.baselineVolume * 95 + swapAmount * 5) / 100;
+    }
+    
+    /// @notice Update per-address swap history
+    function _updateSwapHistory(
+        PoolId poolId,
+        address sender,
+        uint128 swapAmount
+    ) internal {
+        SwapHistory storage history = swapHistories[sender][poolId];
+        
+        // Reset if window expired
+        if (block.number > history.lastSwapBlock + 50) {
+            history.swapsInWindow = 1;
+            history.volumeInWindow = swapAmount;
+        } else {
+            history.swapsInWindow++;
+            history.volumeInWindow += swapAmount;
+        }
+        
+        history.lastSwapBlock = uint64(block.number);
+    }
+    
+    // ============================================
+    // KEEPER FUNCTIONS
+    // ============================================
+    
+    /// @notice Register as a keeper
+    function registerKeeper() external payable {
+        require(msg.value >= MIN_KEEPER_STAKE, "Insufficient stake");
+        require(!keepers[msg.sender].isActive, "Already registered");
+        
+        keepers[msg.sender] = Keeper({
+            stake: uint128(msg.value),
+            reputationScore: 5000, // Start at neutral
+            isActive: true
+        });
+        
+        activeKeepers.push(msg.sender);
+        
+        emit KeeperRegistered(msg.sender, uint128(msg.value));
+    }
+    
+    /// @notice Submit challenge against suspected attacker
+    function submitChallenge(
+        PoolId poolId,
+        address suspectedAttacker,
+        bytes32 evidenceHash
+    ) external returns (uint256) {
+        require(keepers[msg.sender].isActive, "Not a keeper");
+        require(keepers[msg.sender].stake >= MIN_KEEPER_STAKE, "Insufficient stake");
+        
+        uint256 challengeId = challenges[poolId].length;
+        
+        challenges[poolId].push(Challenge({
+            suspectedAttacker: suspectedAttacker,
+            challenger: msg.sender,
+            evidenceHash: evidenceHash,
+            submitBlock: uint64(block.number),
+            votesFor: 0,
+            votesAgainst: 0,
+            executed: false,
+            challengerStake: MIN_KEEPER_STAKE / 10 // 10% of min stake
+        }));
+        
+        emit ChallengeSubmitted(poolId, challengeId, suspectedAttacker, msg.sender);
+        
+        return challengeId;
+    }
+    
+    /// @notice Vote on a challenge
+    function voteOnChallenge(
+        PoolId poolId,
+        uint256 challengeId,
+        bool support
+    ) external {
+        require(keepers[msg.sender].isActive, "Not a keeper");
+        
+        Challenge storage challenge = challenges[poolId][challengeId];
+        require(!challenge.executed, "Already executed");
+        require(block.number < challenge.submitBlock + CHALLENGE_DURATION, "Voting ended");
+        
+        // Weight vote by reputation
+        uint16 weight = uint16(keepers[msg.sender].reputationScore / 1000);
+        
+        if (support) {
+            challenge.votesFor += weight;
+        } else {
+            challenge.votesAgainst += weight;
+        }
+        
+        emit ChallengeVoted(poolId, challengeId, msg.sender, support);
+    }
+    
+    /// @notice Execute challenge after voting period
+    function executeChallenge(
+        PoolId poolId,
+        uint256 challengeId
+    ) external {
+        Challenge storage challenge = challenges[poolId][challengeId];
+        
+        require(!challenge.executed, "Already executed");
+        require(block.number >= challenge.submitBlock + CHALLENGE_DURATION, "Voting active");
+        
+        uint16 totalVotes = challenge.votesFor + challenge.votesAgainst;
+        require(totalVotes > 0, "No votes");
+        
+        // Require 70% supermajority
+        bool approved = (challenge.votesFor * 100 / totalVotes) >= 70;
+        
+        if (approved) {
+            // Apply penalty
+            addressPenalties[poolId][challenge.suspectedAttacker] = 
+                uint64(block.number + PENALTY_DURATION);
+            
+            // Reward challenger
+            keepers[challenge.challenger].reputationScore += 100;
+            
+        } else {
+            // Penalize false accuser
+            if (keepers[challenge.challenger].reputationScore > 100) {
+                keepers[challenge.challenger].reputationScore -= 100;
+            }
+        }
+        
+        challenge.executed = true;
+        
+        emit ChallengeExecuted(poolId, challengeId, approved);
+    }
+    
+    // ============================================
+    // VIEW FUNCTIONS
+    // ============================================
+    
+    function getPoolState(PoolId poolId) external view returns (PoolState memory) {
+        return poolStates[poolId];
+    }
+    
+    function getSwapHistory(
+        address user,
+        PoolId poolId
+    ) external view returns (SwapHistory memory) {
+        return swapHistories[user][poolId];
+    }
+    
+    function getChallenge(
+        PoolId poolId,
+        uint256 challengeId
+    ) external view returns (Challenge memory) {
+        return challenges[poolId][challengeId];
+    }
+    
+    function getChallengeCount(PoolId poolId) external view returns (uint256) {
+        return challenges[poolId].length;
+    }
+    
+    function getKeeper(address keeper) external view returns (Keeper memory) {
+        return keepers[keeper];
+    }
+    
+    function isPenalized(
+        PoolId poolId,
+        address user
+    ) external view returns (bool) {
+        return block.number < addressPenalties[poolId][user];
+    }
+}

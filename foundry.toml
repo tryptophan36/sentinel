@@ -1,0 +1,28 @@
+[profile.default]
+src = "contracts"
+out = "out"
+libs = ["lib"]
+remappings = [
+    "v4-core/=lib/v4-core/src/",
+    "v4-periphery/=lib/v4-periphery/src/",
+    "forge-std/=lib/forge-std/src/",
+    "@openzeppelin/=lib/openzeppelin-contracts/",
+]
+
+# Compiler settings
+solc_version = "0.8.24"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 1000000
+
+# Test settings
+verbosity = 2
+fuzz_runs = 256
+
+[rpc_endpoints]
+sepolia = "${NEXT_PUBLIC_SEPOLIA_RPC}"
+mainnet = "${NEXT_PUBLIC_MAINNET_RPC}"
+
+[etherscan]
+sepolia = { key = "${ETHERSCAN_API_KEY}" }
+mainnet = { key = "${ETHERSCAN_API_KEY}" }
