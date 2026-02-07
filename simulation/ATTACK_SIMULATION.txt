@@ -1,0 +1,173 @@
+================================================================================
+HOOKDGUARD - ATTACK SIMULATION GUIDE
+================================================================================
+
+POOL SUCCESSFULLY INITIALIZED!
+
+Pool ID: 0x60a741974b0c2d0cc6e5f0882fa8215d78566bbe3170d00aec2ebe9f93bd5cde
+Tokens: ETH/USDC on Sepolia Testnet
+Initial Price: ~2500 USDC per ETH
+
+================================================================================
+CURRENT POOL STATUS
+================================================================================
+
+Protection Enabled: YES
+Velocity Multiplier: 3x (300% of baseline)
+Block Window: 10 blocks
+Surge Fee Multiplier: 5x
+Baseline Volume: 1 ETH
+Max Allowed Volume: 3 ETH (before surge fees kick in)
+
+================================================================================
+IMPORTANT: LIQUIDITY REQUIRED!
+================================================================================
+
+⚠️  The pool is initialized but has NO LIQUIDITY yet!
+You MUST add liquidity before simulating attacks.
+
+See LIQUIDITY_GUIDE.txt for detailed instructions.
+
+Quick check:
+  cd simulation && ./check-tokens.sh
+
+================================================================================
+QUICK COMMANDS
+================================================================================
+
+1. CHECK TOKEN BALANCES:
+   cd simulation && ./check-tokens.sh
+
+2. CHECK POOL STATUS:
+   cd simulation && ./check-pool.sh
+
+3. VIEW POOL IN FRONTEND:
+   npm run dev
+   (then visit http://localhost:3000/pools)
+
+4. SIMULATE ATTACKS (after adding liquidity):
+   cd simulation && ./attack-sim.sh velocity    # High volume attack
+   cd simulation && ./attack-sim.sh wash        # Wash trading attack
+   cd simulation && ./attack-sim.sh sandwich    # Sandwich attack
+   cd simulation && ./attack-sim.sh gradual     # Progressive fee test
+
+================================================================================
+MANUAL TESTING WITH FORGE
+================================================================================
+
+Check Pool State:
+  forge script script/QuickSwap.s.sol \
+    --rpc-url https://ethereum-sepolia-rpc.publicnode.com
+
+Initialize New Pool:
+  ./init-pool.sh
+
+================================================================================
+PROTECTION LAYERS ACTIVE
+================================================================================
+
+Layer 1: VELOCITY PROTECTION
+  - Monitors volume over 10 blocks
+  - Triggers surge fees when volume >3x baseline
+  - Current baseline: 1 ETH
+
+Layer 2: PROGRESSIVE FEES
+  - Increases fees for frequent swappers
+  - Tracks last 50 blocks of activity
+  - Each swap adds 20% to fee
+
+Layer 3: CHALLENGE SYSTEM
+  - Keepers can flag suspicious addresses
+  - Voting period: 5 blocks
+  - Penalty duration: 100 blocks
+  - Penalty fee: 50% additional
+
+================================================================================
+TESTING WORKFLOW
+================================================================================
+
+1. Get Test Tokens:
+   - ETH: https://sepoliafaucet.com/
+   - Wrap ETH to WETH for pool interactions
+   - Get test USDC from faucets
+
+2. Register as Keeper (optional):
+   - Frontend: http://localhost:3000/keeper
+   - Minimum stake: 0.001 ETH
+   - Enables challenge submission
+
+3. Perform Test Swaps:
+   - Use Uniswap V4 interface or custom scripts
+   - Watch for protection triggers
+   - Monitor fee increases
+
+4. Submit Challenges:
+   - Flag suspicious addresses
+   - Other keepers vote
+   - Watch penalties apply
+
+5. Monitor Dashboard:
+   - Real-time pool metrics
+   - Challenge status
+   - Protection events
+
+================================================================================
+WHAT TO OBSERVE
+================================================================================
+
+Normal Swap:
+  - Base fee: 0.3% (3000 bps)
+  - No additional protection fees
+
+Velocity Attack (>3 ETH in 10 blocks):
+  - Surge fees apply
+  - Fee increases with excess volume
+  - Max surge fee: 10%
+
+Frequent Swapper (5+ swaps in 50 blocks):
+  - Progressive fees accumulate
+  - Each swap adds ~0.06%
+  - Total can reach 1-2%
+
+Penalized Address:
+  - 50% additional fee (500000 bps)
+  - Lasts 100 blocks (~20 minutes)
+  - Applied after successful challenge
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. Update .env.local if not already done:
+   NEXT_PUBLIC_POOL_IDS=0x60a741974b0c2d0cc6e5f0882fa8215d78566bbe3170d00aec2ebe9f93bd5cde
+
+2. Restart Next.js dev server:
+   npm run dev
+
+3. Visit the dashboard to see real-time data:
+   - Dashboard: http://localhost:3000/dashboard
+   - Pools: http://localhost:3000/pools
+   - Challenges: http://localhost:3000/challenges
+   - Keeper: http://localhost:3000/keeper
+
+4. Start simulating attacks to test protection mechanisms
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+"Pool not found" error:
+  - Make sure NEXT_PUBLIC_POOL_IDS is set in .env.local
+  - Restart the Next.js dev server
+
+"Transaction fails" error:
+  - Ensure you have test ETH on Sepolia
+  - Check RPC connection
+  - Verify contract addresses
+
+"No protection triggered":
+  - Check if volume exceeds 3 ETH in 10 blocks
+  - Verify protection is enabled (should be by default)
+  - Look at recent volume in pool state
+
+================================================================================

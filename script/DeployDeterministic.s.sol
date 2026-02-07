@@ -5,6 +5,7 @@ import "forge-std/Script.sol";
 import "../contracts/HookdGuardMVP.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
+import {HookMiner} from "v4-periphery/utils/HookMiner.sol";
 
 /**
  * @title DeployDeterministicScript
@@ -12,6 +13,9 @@ import {Hooks} from "v4-core/libraries/Hooks.sol";
  * @dev Uniswap V4 hooks must have addresses with specific bit flags set
  */
 contract DeployDeterministicScript is Script {
+    // Foundry CREATE2 Deployer address (same across most chains)
+    address constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
+    
     // Required hook permissions encoded in address
     uint160 constant HOOK_FLAGS = uint160(
         Hooks.AFTER_INITIALIZE_FLAG |
@@ -20,23 +24,29 @@ contract DeployDeterministicScript is Script {
     );
     
     // Pool manager addresses - update these with actual V4 addresses
-    address constant SEPOLIA_POOL_MANAGER = address(0); // TODO
-    address constant MAINNET_POOL_MANAGER = address(0); // TODO
+    address constant SEPOLIA_POOL_MANAGER = 0xE03A1074c86CFeDd5C142C4F04F1a1536e203543;
+    address constant MAINNET_POOL_MANAGER = 0x000000000004444c5dc75cB358380D2e3dE08A90;
     
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address poolManager = getPoolManager();
         require(poolManager != address(0), "Invalid pool manager address");
         
-        vm.startBroadcast(deployerPrivateKey);
-        
-        // Mine for the correct salt
-        (address hookAddress, bytes32 salt) = mineSalt(vm.addr(deployerPrivateKey), poolManager);
+        // Mine for the correct salt using HookMiner
+        bytes memory constructorArgs = abi.encode(poolManager);
+        (address hookAddress, bytes32 salt) = HookMiner.find(
+            CREATE2_DEPLOYER,
+            HOOK_FLAGS,
+            type(HookdGuardMVP).creationCode,
+            constructorArgs
+        );
         
         console.log("Found valid hook address:", hookAddress);
         console.log("Using salt:", vm.toString(salt));
         
-        // Deploy with the mined salt
+        vm.startBroadcast(deployerPrivateKey);
+        
+        // Deploy with the mined salt using CREATE2
         HookdGuardMVP hook = new HookdGuardMVP{salt: salt}(
             IPoolManager(poolManager)
         );
@@ -53,46 +63,6 @@ contract DeployDeterministicScript is Script {
         console.log("NEXT_PUBLIC_POOL_MANAGER_ADDRESS=", poolManager);
         
         vm.stopBroadcast();
-    }
-    
-    function mineSalt(
-        address deployer,
-        address poolManager
-    ) internal view returns (address, bytes32) {
-        bytes memory creationCode = abi.encodePacked(
-            type(HookdGuardMVP).creationCode,
-            abi.encode(poolManager)
-        );
-        
-        // Try different salts until we find one that produces a valid hook address
-        for (uint256 i = 0; i < 100000; i++) {
-            bytes32 salt = bytes32(i);
-            address predictedAddress = computeCreate2Address(
-                salt,
-                keccak256(creationCode),
-                deployer
-            );
-            
-            // Check if address has correct hook flags
-            if (uint160(predictedAddress) & HOOK_FLAGS == HOOK_FLAGS) {
-                return (predictedAddress, salt);
-            }
-        }
-        
-        revert("Could not find valid salt");
-    }
-    
-    function computeCreate2Address(
-        bytes32 salt,
-        bytes32 initCodeHash,
-        address deployer
-    ) internal pure returns (address) {
-        return address(uint160(uint256(keccak256(abi.encodePacked(
-            bytes1(0xff),
-            deployer,
-            salt,
-            initCodeHash
-        )))));
     }
     
     function getPoolManager() internal view returns (address) {

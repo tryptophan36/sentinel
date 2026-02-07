@@ -47,14 +47,8 @@ if grep -q "your_private_key_here" .env.local; then
     exit 1
 fi
 
-# Load environment variables
-source .env.local
 
-# Validate environment
-if [ -z "$DEPLOYER_PRIVATE_KEY" ]; then
-    echo "❌ DEPLOYER_PRIVATE_KEY not set in .env.local"
-    exit 1
-fi
+
 
 echo ""
 echo "🔍 Pre-deployment checks..."

@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {BaseHook} from "v4-periphery/BaseHook.sol";
+import {BaseHook} from "v4-periphery/utils/BaseHook.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/types/BeforeSwapDelta.sol";
+import {SwapParams} from "v4-core/types/PoolOperation.sol";
+import {LPFeeLibrary} from "v4-core/libraries/LPFeeLibrary.sol";
 
 /// @title HookdGuardMVP
 /// @notice Protects LPs from MEV through velocity limits and progressive fees
@@ -71,7 +73,7 @@ contract HookdGuardMVP is BaseHook {
     address[] public activeKeepers;
     
     // Constants
-    uint256 public constant MIN_KEEPER_STAKE = 0.1 ether;
+    uint256 public constant MIN_KEEPER_STAKE = 0.001 ether;
     uint256 public constant CHALLENGE_DURATION = 5; // blocks
     uint256 public constant PENALTY_DURATION = 100; // blocks
     uint256 public constant PENALTY_FEE_BPS = 5000; // 50% extra fee
@@ -138,14 +140,16 @@ contract HookdGuardMVP is BaseHook {
     // HOOK IMPLEMENTATIONS
     // ============================================
     
+    /// @notice Base LP fee for dynamic fee pools (0.3%)
+    uint24 public constant BASE_LP_FEE = 3000;
+    
     /// @notice Initialize pool configuration
-    function afterInitialize(
+    function _afterInitialize(
         address,
         PoolKey calldata key,
         uint160 sqrtPriceX96,
-        int24,
-        bytes calldata
-    ) external override onlyPoolManager returns (bytes4) {
+        int24
+    ) internal override returns (bytes4) {
         PoolId poolId = key.toId();
         
         // Set default configuration
@@ -156,24 +160,29 @@ contract HookdGuardMVP is BaseHook {
             protectionEnabled: true
         });
         
-        // Initialize state
+        // Initialize state with reasonable baseline for 6-decimal tokens (e.g., USDC)
+        // 50 USDC baseline → velocity triggers at 150 USDC in window
         poolStates[poolId] = PoolState({
             recentVolume: 0,
-            baselineVolume: 1 ether,      // Default 1 ETH baseline
+            baselineVolume: 50_000_000,   // 50e6 (50 USDC-equivalent)
             lastUpdateBlock: uint64(block.number),
             lastPrice: sqrtPriceX96
         });
+        
+        // Set base LP fee for dynamic fee pools
+        // (dynamic fee pools initialize with fee=0, we must set the base fee here)
+        poolManager.updateDynamicLPFee(key, BASE_LP_FEE);
         
         return BaseHook.afterInitialize.selector;
     }
     
     /// @notice Main protection logic before swap
-    function beforeSwap(
+    function _beforeSwap(
         address sender,
         PoolKey calldata key,
-        IPoolManager.SwapParams calldata params,
+        SwapParams calldata params,
         bytes calldata
-    ) external override onlyPoolManager returns (bytes4, BeforeSwapDelta, uint24) {
+    ) internal override returns (bytes4, BeforeSwapDelta, uint24) {
         PoolId poolId = key.toId();
         PoolConfig memory config = poolConfigs[poolId];
         
@@ -182,6 +191,12 @@ contract HookdGuardMVP is BaseHook {
             return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
         }
         
+        // Use tx.origin for per-user tracking (Layer 2 & 3).
+        // `sender` is the router contract (e.g. PoolSwapTest), NOT the actual user.
+        // tx.origin gives us the real wallet behind the swap, so progressive fees
+        // and penalties are properly per-user instead of shared across all users.
+        address swapper = tx.origin;
+        
         // Calculate swap amount (absolute value)
         uint128 swapAmount = uint128(
             params.amountSpecified > 0 
@@ -189,34 +204,39 @@ contract HookdGuardMVP is BaseHook {
                 : uint256(-params.amountSpecified)
         );
         
-        // Layer 1: Velocity Protection
+        // Layer 1: Velocity Protection (pool-wide, uses swap amount only)
         uint24 velocityFee = _checkVelocity(poolId, swapAmount, config);
         
-        // Layer 2: Progressive Fees
-        uint24 progressiveFee = _checkProgressive(poolId, sender, swapAmount);
+        // Layer 2: Progressive Fees (per-user, uses tx.origin)
+        uint24 progressiveFee = _checkProgressive(poolId, swapper, swapAmount);
         
-        // Layer 3: Challenge Penalty
-        uint24 penaltyFee = _checkPenalty(poolId, sender);
+        // Layer 3: Challenge Penalty (per-user, uses tx.origin)
+        uint24 penaltyFee = _checkPenalty(poolId, swapper);
         
         // Combine fees (take maximum to avoid stacking)
         uint24 totalFee = _maxFee(velocityFee, progressiveFee, penaltyFee);
         
         // Emit if protection triggered
         if (totalFee > 0) {
-            emit ProtectionTriggered(poolId, sender, totalFee, "MEV_PROTECTION");
+            emit ProtectionTriggered(poolId, swapper, totalFee, "MEV_PROTECTION");
+            
+            // Return base fee + surge with OVERRIDE flag so PoolManager actually uses it.
+            // Without OVERRIDE_FEE_FLAG, the dynamic fee from the hook is silently ignored.
+            uint24 overrideFee = (BASE_LP_FEE + totalFee) | LPFeeLibrary.OVERRIDE_FEE_FLAG;
+            return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, overrideFee);
         }
         
-        return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, totalFee);
+        return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
     
     /// @notice Update state after swap
-    function afterSwap(
-        address sender,
+    function _afterSwap(
+        address,
         PoolKey calldata key,
-        IPoolManager.SwapParams calldata params,
+        SwapParams calldata params,
         BalanceDelta,
         bytes calldata
-    ) external override onlyPoolManager returns (bytes4, int128) {
+    ) internal override returns (bytes4, int128) {
         PoolId poolId = key.toId();
         
         uint128 swapAmount = uint128(
@@ -225,11 +245,11 @@ contract HookdGuardMVP is BaseHook {
                 : uint256(-params.amountSpecified)
         );
         
-        // Update pool state
+        // Update pool state (pool-wide velocity tracking)
         _updatePoolState(poolId, swapAmount);
         
-        // Update swap history
-        _updateSwapHistory(poolId, sender, swapAmount);
+        // Update swap history for the actual user (tx.origin), not the router
+        _updateSwapHistory(poolId, tx.origin, swapAmount);
         
         return (BaseHook.afterSwap.selector, 0);
     }
@@ -262,7 +282,7 @@ contract HookdGuardMVP is BaseHook {
         
         // Calculate surge fee
         uint256 excessRatio = (newVolume - maxAllowed) * 10000 / maxAllowed;
-        uint24 surgeFee = uint24((3000 * config.surgeFeeMultiplier * excessRatio) / 10000);
+        uint24 surgeFee = uint24((3000 * config.surgeFeeMultiplier * excessRatio) / 1000000);
         
         // Cap at 10%
         return surgeFee > 100000 ? 100000 : surgeFee;
@@ -299,7 +319,7 @@ contract HookdGuardMVP is BaseHook {
         uint64 penaltyUntil = addressPenalties[poolId][sender];
         
         if (block.number < penaltyUntil) {
-            return uint24(PENALTY_FEE_BPS * 10); // 50% = 5000 bps
+            return uint24(PENALTY_FEE_BPS * 10); // 50% = 50000 bps
         }
         
         return 0;
@@ -393,7 +413,7 @@ contract HookdGuardMVP is BaseHook {
             votesFor: 0,
             votesAgainst: 0,
             executed: false,
-            challengerStake: MIN_KEEPER_STAKE / 10 // 10% of min stake
+            challengerStake: uint128(MIN_KEEPER_STAKE / 10) // 10% of min stake
         }));
         
         emit ChallengeSubmitted(poolId, challengeId, suspectedAttacker, msg.sender);
