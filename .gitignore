@@ -38,7 +38,9 @@ next-env.d.ts
 # Foundry
 cache/
 out/
-lib/
+lib/forge-std/
+lib/v4-core/
+lib/v4-periphery/
 
 # Hardhat
 artifacts/
