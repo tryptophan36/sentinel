@@ -197,12 +197,11 @@ contract HookdGuardMVP is BaseHook {
         // and penalties are properly per-user instead of shared across all users.
         address swapper = tx.origin;
         
-        // Calculate swap amount (absolute value)
-        uint128 swapAmount = uint128(
-            params.amountSpecified > 0 
-                ? uint256(params.amountSpecified)
-                : uint256(-params.amountSpecified)
-        );
+        // Normalize swap amount to token0 (currency0) scale for consistent volume tracking.
+        // Raw WETH amounts (18 decimals) are converted to USDC-equivalent (6 decimals)
+        // using the pool's sqrtPriceX96, so a 0.05 WETH swap is treated as ~125 USDC,
+        // not as 50,000,000,000,000,000 raw units.
+        uint128 swapAmount = _getNormalizedAmount(poolId, params);
         
         // Layer 1: Velocity Protection (pool-wide, uses swap amount only)
         uint24 velocityFee = _checkVelocity(poolId, swapAmount, config);
@@ -239,11 +238,8 @@ contract HookdGuardMVP is BaseHook {
     ) internal override returns (bytes4, int128) {
         PoolId poolId = key.toId();
         
-        uint128 swapAmount = uint128(
-            params.amountSpecified > 0 
-                ? uint256(params.amountSpecified)
-                : uint256(-params.amountSpecified)
-        );
+        // Normalize to token0 scale (same as _beforeSwap) for consistent tracking
+        uint128 swapAmount = _getNormalizedAmount(poolId, params);
         
         // Update pool state (pool-wide velocity tracking)
         _updatePoolState(poolId, swapAmount);
@@ -266,6 +262,11 @@ contract HookdGuardMVP is BaseHook {
     ) internal view returns (uint24) {
         PoolState memory state = poolStates[poolId];
         
+        // Guard: if baseline is zero, skip velocity check to avoid division by zero
+        if (state.baselineVolume == 0) {
+            return 0;
+        }
+        
         // Reset if window expired
         uint128 currentVolume = state.recentVolume;
         if (block.number > state.lastUpdateBlock + config.blockWindow) {
@@ -275,17 +276,32 @@ contract HookdGuardMVP is BaseHook {
         uint128 newVolume = currentVolume + swapAmount;
         uint128 maxAllowed = state.baselineVolume * config.velocityMultiplier / 100;
         
+        // Guard: if maxAllowed is zero (e.g., very small baseline * multiplier rounds to 0)
+        if (maxAllowed == 0) {
+            return 0;
+        }
+        
         // If under threshold, no surge fee
         if (newVolume <= maxAllowed) {
             return 0;
         }
         
-        // Calculate surge fee
-        uint256 excessRatio = (newVolume - maxAllowed) * 10000 / maxAllowed;
-        uint24 surgeFee = uint24((3000 * config.surgeFeeMultiplier * excessRatio) / 1000000);
+        // Calculate surge fee with overflow protection
+        // Cap excessRatio to prevent uint24 overflow in surgeFee calculation
+        uint256 excessRatio = (uint256(newVolume - maxAllowed) * 10000) / maxAllowed;
         
-        // Cap at 10%
-        return surgeFee > 100000 ? 100000 : surgeFee;
+        // Cap excessRatio so that surgeFee stays within uint24 range (max 16,777,215)
+        // surgeFee = (3000 * surgeFeeMultiplier * excessRatio) / 1_000_000
+        // Max safe excessRatio = 100000 * 1_000_000 / (3000 * 500) = 66,666
+        // Use a generous cap; the final surgeFee cap at 100000 handles the rest
+        uint256 rawSurgeFee = (3000 * uint256(config.surgeFeeMultiplier) * excessRatio) / 1_000_000;
+        
+        // Cap at 10% (100000 bps) before casting to uint24
+        if (rawSurgeFee > 100000) {
+            return 100000;
+        }
+        
+        return uint24(rawSurgeFee);
     }
     
     /// @notice Layer 2: Progressive fees based on frequency
@@ -329,6 +345,42 @@ contract HookdGuardMVP is BaseHook {
     function _maxFee(uint24 a, uint24 b, uint24 c) internal pure returns (uint24) {
         uint24 max = a > b ? a : b;
         return max > c ? max : c;
+    }
+    
+    /// @notice Normalize token1 amount to token0 equivalent using pool sqrtPriceX96
+    /// @dev price = sqrtPriceX96^2 / 2^192 = (token1 per token0 in raw units)
+    ///      token0 = token1 / price = token1 * 2^192 / sqrtPriceX96^2
+    ///      Computed in two 96-bit shifts to avoid overflow.
+    function _normalizeToToken0(
+        uint128 token1Amount,
+        uint160 sqrtPriceX96
+    ) internal pure returns (uint128) {
+        if (sqrtPriceX96 == 0 || token1Amount == 0) return token1Amount;
+        
+        uint256 intermediate = (uint256(token1Amount) << 96) / uint256(sqrtPriceX96);
+        uint256 result = (intermediate << 96) / uint256(sqrtPriceX96);
+        
+        return result > type(uint128).max ? type(uint128).max : uint128(result);
+    }
+    
+    /// @notice Get normalized swap amount in token0 units for consistent volume tracking
+    function _getNormalizedAmount(
+        PoolId poolId,
+        SwapParams calldata params
+    ) internal view returns (uint128) {
+        uint128 rawAmount = uint128(
+            params.amountSpecified > 0
+                ? uint256(params.amountSpecified)
+                : uint256(-params.amountSpecified)
+        );
+        
+        // If selling token1 (zeroForOne=false), normalize to token0 scale using pool price
+        if (!params.zeroForOne) {
+            uint160 lastPrice = poolStates[poolId].lastPrice;
+            rawAmount = _normalizeToToken0(rawAmount, lastPrice);
+        }
+        
+        return rawAmount;
     }
     
     // ============================================

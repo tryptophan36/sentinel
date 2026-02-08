@@ -6,8 +6,9 @@ import { formatUnits } from 'viem';
 import { DEFAULT_POOL_IDS, USDC_ADDRESS, WETH_ADDRESS, POOL_SWAP_TEST_ADDRESS } from '@/lib/constants';
 import { usePoolData } from '@/lib/hooks/usePoolData';
 import { useSwapHistory } from '@/lib/hooks/useSwapHistory';
+import { useProtectionHistory } from '@/lib/hooks/useProtectionHistory';
 import { formatAmount, formatAddress, formatFee } from '@/lib/utils';
-import { TrendingUp, TrendingDown, RefreshCw } from 'lucide-react';
+import { TrendingUp, TrendingDown, RefreshCw, ShieldAlert } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 // Token configuration for the USDC/WETH pool
@@ -23,6 +24,12 @@ export default function PoolsPage() {
   );
   const { state, config, isLoading } = usePoolData(poolId || undefined);
   const { swaps, stats, hasSwaps, isLoadingHistory, fetchError, refetch: refetchSwaps } = useSwapHistory(poolId || undefined);
+  const {
+    events: protectionEvents,
+    stats: protectionStats,
+    isLoading: isLoadingProtection,
+    hasEvents: hasProtectionEvents,
+  } = useProtectionHistory(poolId || undefined);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const handleRefresh = async () => {
@@ -64,49 +71,123 @@ export default function PoolsPage() {
       </header>
 
       <section className="grid gap-6 lg:grid-cols-[0.8fr_1.2fr]">
-        <div className="rounded-3xl border border-border/60 bg-card/70 p-6 backdrop-blur">
-          <p className="text-xs uppercase tracking-[0.3em] text-muted-foreground">Pool List</p>
-          <h2 className="text-xl font-semibold">Protected Pools</h2>
-          <div className="mt-6 space-y-3">
-            {DEFAULT_POOL_IDS.length === 0 && (
-              <div className="rounded-2xl border border-dashed border-border/60 p-6 text-sm text-muted-foreground">
-                Set NEXT_PUBLIC_POOL_IDS to list pools.
-              </div>
-            )}
-            {DEFAULT_POOL_IDS.map((pool, idx) => (
-              <button
-                key={pool}
-                onClick={() => setPoolId(pool)}
-                className={`w-full rounded-2xl border px-4 py-4 text-left transition ${
-                  pool === poolId
-                    ? 'border-primary/50 bg-primary/10'
-                    : 'border-border/60 bg-background/60 hover:border-primary/30'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-semibold">
-                      Pool {idx + 1}
-                      {idx === 0 && (
-                        <span className="ml-2 rounded-full bg-blue-500/20 px-2 py-0.5 text-[10px] text-blue-300 font-normal">
-                          Active
-                        </span>
-                      )}
-                      {idx > 0 && (
-                        <span className="ml-2 rounded-full bg-slate-500/20 px-2 py-0.5 text-[10px] text-slate-400 font-normal">
-                          Legacy
-                        </span>
-                      )}
-                    </p>
-                    <p className="text-xs text-muted-foreground font-mono">{pool}</p>
-                  </div>
-                  <span className="rounded-full bg-emerald-500/20 px-3 py-1 text-xs text-emerald-200">
-                    {config?.protectionEnabled ? 'Protected' : 'Disabled'}
-                  </span>
+        <div className="space-y-6">
+          <div className="rounded-3xl border border-border/60 bg-card/70 p-6 backdrop-blur">
+            <p className="text-xs uppercase tracking-[0.3em] text-muted-foreground">Pool List</p>
+            <h2 className="text-xl font-semibold">Protected Pools</h2>
+            <div className="mt-6 space-y-3 max-h-64 overflow-y-auto">
+              {DEFAULT_POOL_IDS.length === 0 && (
+                <div className="rounded-2xl border border-dashed border-border/60 p-6 text-sm text-muted-foreground">
+                  Set NEXT_PUBLIC_POOL_IDS to list pools.
                 </div>
-              </button>
-            ))}
+              )}
+              {DEFAULT_POOL_IDS.map((pool, idx) => (
+                <button
+                  key={pool}
+                  onClick={() => setPoolId(pool)}
+                  className={`w-full rounded-2xl border px-4 py-4 text-left transition ${
+                    pool === poolId
+                      ? 'border-primary/50 bg-primary/10'
+                      : 'border-border/60 bg-background/60 hover:border-primary/30'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-semibold">
+                        Pool {idx + 1}
+                        {idx === 0 && (
+                          <span className="ml-2 rounded-full bg-blue-500/20 px-2 py-0.5 text-[10px] text-blue-300 font-normal">
+                            Active
+                          </span>
+                        )}
+                        {idx > 0 && (
+                          <span className="ml-2 rounded-full bg-slate-500/20 px-2 py-0.5 text-[10px] text-slate-400 font-normal">
+                            Legacy
+                          </span>
+                        )}
+                      </p>
+                      <p className="text-xs text-muted-foreground font-mono">{pool}</p>
+                    </div>
+                    <span className="rounded-full bg-emerald-500/20 px-3 py-1 text-xs text-emerald-200">
+                      {config?.protectionEnabled ? 'Protected' : 'Disabled'}
+                    </span>
+                  </div>
+                </button>
+              ))}
+            </div>
           </div>
+
+          {/* Protection Events Section */}
+          {poolId && (
+            <div className="rounded-3xl border border-border/60 bg-card/70 p-6 backdrop-blur">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.3em] text-muted-foreground">
+                    On-Chain Evidence
+                  </p>
+                  <h2 className="text-xl font-semibold">Protection Events</h2>
+                </div>
+                {hasProtectionEvents && (
+                  <span className="rounded-full bg-red-500/20 px-3 py-1 text-xs text-red-300">
+                    {protectionStats.totalBlocked} blocked
+                  </span>
+                )}
+              </div>
+
+              <div className="mt-6 space-y-3 max-h-96 overflow-y-auto">
+                {isLoadingProtection ? (
+                  <div className="rounded-2xl border border-dashed border-border/60 p-6 text-sm text-muted-foreground">
+                    Scanning chain for ProtectionTriggered events...
+                  </div>
+                ) : !hasProtectionEvents ? (
+                  <div className="rounded-2xl border border-dashed border-border/60 p-6 text-sm text-muted-foreground">
+                    No protection events found yet. Run attack simulations to generate them.
+                  </div>
+                ) : (
+                  protectionEvents.map((ev) => (
+                    <div
+                      key={ev.id}
+                      className="rounded-2xl border border-red-500/30 bg-red-500/10 p-4"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <ShieldAlert className="h-4 w-4 text-red-400" />
+                          <span className="text-sm font-semibold text-red-300">
+                            Attack Blocked
+                          </span>
+                        </div>
+                        <span className="text-xs text-muted-foreground">
+                          Block {ev.blockNumber.toString()}
+                        </span>
+                      </div>
+                      <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                        <div>
+                          <span className="text-muted-foreground">Attacker: </span>
+                          <span className="font-mono">{formatAddress(ev.swapper)}</span>
+                        </div>
+                        <div>
+                          <span className="text-muted-foreground">Surge Fee: </span>
+                          <span className="font-semibold text-red-300">
+                            {formatFee(ev.fee)}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="mt-2 text-xs text-muted-foreground">
+                        <a
+                          href={`https://sepolia.etherscan.io/tx/${ev.transactionHash}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="hover:text-primary transition"
+                        >
+                          View tx on Etherscan &rarr;
+                        </a>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {poolId && (
@@ -205,10 +286,15 @@ export default function PoolsPage() {
                     swaps.slice(0, 20).map((swap) => {
                       const isViaRouter = swap.sender.toLowerCase() === POOL_SWAP_TEST_ADDRESS.toLowerCase();
                       const displayAddr = swap.from !== swap.sender ? swap.from : swap.sender;
+                      const isElevated = swap.fee > 3000; // Base fee is 3000 pips (0.3%)
                       return (
                         <div
                           key={swap.id}
-                          className="rounded-2xl border border-border/60 bg-background/60 p-4"
+                          className={`rounded-2xl border p-4 ${
+                            isElevated
+                              ? 'border-amber-500/40 bg-amber-500/10'
+                              : 'border-border/60 bg-background/60'
+                          }`}
                         >
                           <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2">
@@ -226,8 +312,13 @@ export default function PoolsPage() {
                                 </span>
                               )}
                             </div>
-                            <span className="text-xs text-muted-foreground">
+                            <span
+                              className={`text-xs font-semibold ${
+                                isElevated ? 'text-amber-300' : 'text-muted-foreground'
+                              }`}
+                            >
                               Fee: {formatFee(swap.fee)}
+                              {isElevated && ' (surge)'}
                             </span>
                           </div>
                           <div className="mt-2 grid grid-cols-2 gap-2 text-xs">

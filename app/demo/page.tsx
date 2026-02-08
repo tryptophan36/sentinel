@@ -143,12 +143,12 @@ export default function DemoPage() {
       {/* Pool State (compact) */}
       {pool.state && pool.config && (
         <section className="grid gap-4 md:grid-cols-4">
-          <MiniStat label="Recent Volume" value={formatAmount(pool.state.recentVolume)} />
-          <MiniStat label="Baseline Volume" value={formatAmount(pool.state.baselineVolume)} />
+          <MiniStat label="Recent Volume" value={formatAmount(pool.state.recentVolume, 6)} />
+          <MiniStat label="Baseline Volume" value={formatAmount(pool.state.baselineVolume, 6)} />
           <MiniStat
             label="Velocity Limit (3x)"
             value={formatAmount(
-              (pool.state.baselineVolume * BigInt(pool.config.velocityMultiplier)) / 100n
+              (pool.state.baselineVolume * BigInt(pool.config.velocityMultiplier)) / 100n, 6
             )}
           />
           <MiniStat label="Current Block" value={blockNumber?.toString() || '--'} />
@@ -242,7 +242,7 @@ export default function DemoPage() {
             />
             <AttackButton
               title="Sandwich Attack"
-              description="Front-run (50) + victim (20) + back-run (80) USDC → WETH → Multi-layer protection"
+              description="Front-run (50 USDC→WETH) + victim (20 USDC→WETH) + back-run (0.02 WETH→USDC) → Multi-layer protection"
               layer="Layer 1+2"
               onClick={swap.attackSandwich}
               disabled={!isConnected || swap.isExecuting}
@@ -332,45 +332,53 @@ export default function DemoPage() {
               )}
               {challenges.challenges
                 .filter((c) => !c.executed)
-                .map((c) => (
-                  <div key={c.id} className="rounded-xl border border-border/60 bg-background/60 p-3">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="text-muted-foreground">Challenge #{c.id}</span>
-                      <span className="text-amber-300">
-                        {c.votesFor}v / {c.votesAgainst}a
-                      </span>
+                .map((c) => {
+                  const votingEnded = blockNumber ? blockNumber >= c.submitBlock + 5n : false;
+                  return (
+                    <div key={c.id} className="rounded-xl border border-border/60 bg-background/60 p-3">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-muted-foreground">Challenge #{c.id}</span>
+                        <span className="text-amber-300">
+                          {c.votesFor}v / {c.votesAgainst}a
+                        </span>
+                      </div>
+                      <p className="text-xs font-mono text-muted-foreground mt-1">
+                        Target: {formatAddress(c.suspectedAttacker)}
+                      </p>
+                      <div className="mt-2 flex gap-2">
+                        {!votingEnded ? (
+                          <>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              className="flex-1 text-xs"
+                              onClick={() => challenges.voteOnChallenge(c.id, true)}
+                            >
+                              Vote For
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              className="flex-1 text-xs"
+                              onClick={() => challenges.voteOnChallenge(c.id, false)}
+                            >
+                              Against
+                            </Button>
+                          </>
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="flex-1 text-xs border border-border/60"
+                            onClick={() => challenges.executeChallenge(c.id)}
+                          >
+                            Execute
+                          </Button>
+                        )}
+                      </div>
                     </div>
-                    <p className="text-xs font-mono text-muted-foreground mt-1">
-                      Target: {formatAddress(c.suspectedAttacker)}
-                    </p>
-                    <div className="mt-2 flex gap-2">
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        className="flex-1 text-xs"
-                        onClick={() => challenges.voteOnChallenge(c.id, true)}
-                      >
-                        Vote For
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        className="flex-1 text-xs"
-                        onClick={() => challenges.voteOnChallenge(c.id, false)}
-                      >
-                        Against
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="text-xs border border-border/60"
-                        onClick={() => challenges.executeChallenge(c.id)}
-                      >
-                        Execute
-                      </Button>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
             </div>
           </div>
         </div>

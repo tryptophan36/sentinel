@@ -23,7 +23,6 @@ export function Navbar() {
           <Link href="/dashboard" className="hover:text-foreground transition">Dashboard</Link>
           <Link href="/pools" className="hover:text-foreground transition">Pools</Link>
           <Link href="/demo" className="hover:text-foreground transition font-semibold text-amber-400 hover:text-amber-300">Demo</Link>
-          <Link href="/simulations" className="hover:text-foreground transition">Simulations</Link>
           <Link href="/keeper" className="hover:text-foreground transition">Keeper</Link>
           <Link href="/challenges" className="hover:text-foreground transition">Challenges</Link>
           <ConnectButton />
