@@ -1,6 +1,6 @@
-# Hook'd Guard — Uniswap v4 Agentic Liquidity Sentinel
+# Sentinel — Uniswap v4 Agentic Liquidity Sentinel
 
-Hook'd Guard is a lightweight agentic sentinel that monitors mempool activity and pool imbalance signals to protect LPs from targeted MEV (sandwiches, imbalance drains). When suspicious swaps are detected, it triggers a Uniswap v4 hook that raises fees or pauses swaps for a single block.
+Sentinel is a lightweight agentic sentinel that monitors mempool activity and pool imbalance signals to protect LPs from targeted MEV (sandwiches, imbalance drains). When suspicious swaps are detected, it triggers a Uniswap v4 hook that raises fees or pauses swaps for a single block.
 
 ## Repo layout
 - `app/` — Next.js App Router UI (simple dashboard)

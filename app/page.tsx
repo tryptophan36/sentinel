@@ -12,7 +12,7 @@ export default function Home() {
             Autonomous MEV Defense
           </p>
           <h1 className="text-4xl md:text-6xl font-semibold leading-tight">
-            Hook&apos;d Guard V2 keeps LPs ahead of MEV.
+            Sentinel keeps LPs ahead of MEV.
           </h1>
           <p className="text-lg text-muted-foreground max-w-xl">
             A decentralized agent network coordinating through Uniswap v4 hooks to block sandwich attacks,

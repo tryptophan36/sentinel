@@ -17,7 +17,7 @@ const spaceMono = Space_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'Hook\'d Guard - Decentralized LP Protection',
+  title: 'Sentinel - Decentralized LP Protection',
   description: 'Autonomous agent network protecting Uniswap v4 liquidity providers from MEV attacks',
 };
 
