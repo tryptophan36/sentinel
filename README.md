@@ -263,7 +263,7 @@ npm start
 View recent transactions showing protection in action:
 - [Attack Blocked #1](https://sepolia.etherscan.io/tx/0x14729a322216eb0eb4cbcb4cd81777241724820adcdcaf38095cb6a3c8672027)
 - [Attack Blocked #2](https://sepolia.etherscan.io/tx/0x966dd68835bc2e6e460235dfbf679e8d3d656be2bb0701458bcaf07dcd98502d)
-- [Surge Fee Applied]([https://sepolia.etherscan.io/tx/0x...](https://sepolia.etherscan.io/tx/0xd6d50434983273ec6ddc9bfc6cd211deb29babd718add4e9bf2326b6eccd53b9))
+- [Surge Fee Applied]([https://sepolia.etherscan.io/tx/0x...](https://sepolia.etherscan.io/tx/0xd6d50434983273ec6ddc9bfc6cd211deb29babd718add4e9bf2326b6eccd53b9)
 
 ---
 
